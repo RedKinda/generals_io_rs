@@ -12,7 +12,7 @@ use std::{
     marker::PhantomData,
     ops::{Add, AddAssign, Div},
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
     },
     time::Duration,
@@ -24,8 +24,7 @@ use crate::{
     state::{GameState, GeneralsGameState, MoveCommand, PlayerId},
 };
 
-type OxyTree<'a, State> = LazyMcts<
-    'a,
+type OxyTree<State> = LazyMcts<
     State,
     DefaultLazyTreePolicy<State, GeneralsUctEvaluator, (), f64>,
     GeneralsPlayout,
@@ -35,22 +34,27 @@ type OxyTree<'a, State> = LazyMcts<
     f64,
 >;
 
-pub struct MctsTree {}
+pub struct MctsTree {
+    tree: OxyTree<GameStateWrapper>,
+}
 impl MctsTree {
-    pub async fn get_best_move(state: &GeneralsGameState, rollout_for: Duration) -> MoveCommand {
-        let mut wrapped = GameStateWrapper {
+    pub fn new(state: &GeneralsGameState) -> Self {
+        let wrapped = GameStateWrapper {
             state: state.clone(),
             turn: state.player_id(),
         };
-        wrapped.state.max_turn = wrapped.state.turn + MAX_TURNS;
 
+        Self {
+            tree: OxyTree::new(wrapped),
+        }
+    }
+
+    pub async fn train_until_interrupt(&self, interrupt: Arc<AtomicBool>) {
+        let tree_ref = &self.tree;
         let c = f64::SQRT_2();
+        let rollout_count = Arc::new(AtomicU32::new(0));
+
         let start = std::time::Instant::now();
-
-        let rollout_count: AtomicU32 = AtomicU32::new(0);
-        let tree = OxyTree::new(&wrapped);
-        let tree_ref = &tree;
-
         unsafe {
             // unsafe block because forgetting is unsafe, but we await it so its fine
             async_scoped::TokioScope::scope_and_collect(|s| {
@@ -59,7 +63,7 @@ impl MctsTree {
                         loop {
                             tree_ref.execute(&c, ());
                             rollout_count.fetch_add(1, Ordering::Relaxed);
-                            if start.elapsed() > rollout_for {
+                            if interrupt.load(Ordering::Relaxed) {
                                 break;
                             }
                         }
@@ -71,16 +75,31 @@ impl MctsTree {
             .await;
         }
 
-        // info!("{}", tree.write_tree());
-
-        let best_move = tree.best_move(&c);
-        let rollout_count = rollout_count.load(Ordering::Relaxed);
+        let end = start.elapsed();
 
         info!(
-            "Rollout count: {}, rollout/s: {}",
-            rollout_count,
-            rollout_count as f64 / start.elapsed().as_secs_f64()
+            "Rollout count: {}, rollout/s: {} for {}ms",
+            rollout_count.load(Ordering::Relaxed),
+            rollout_count.load(Ordering::Relaxed) as f64 / end.as_secs_f64(),
+            end.as_millis()
         );
+    }
+
+    pub async fn get_best_move(&self, rollout_for: Duration) -> MoveCommand {
+        let c = f64::SQRT_2();
+        let notifier = Arc::new(AtomicBool::new(false));
+        let interrupt = notifier.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(rollout_for).await;
+            notifier.store(true, Ordering::Relaxed);
+        });
+
+        self.train_until_interrupt(interrupt).await;
+
+        // info!("{}", tree.write_tree());
+
+        let best_move = self.tree.best_move(&c);
 
         match best_move {
             CombinedMoveCommand::Friendly(m) => m,
@@ -93,6 +112,17 @@ impl MctsTree {
 struct GameStateWrapper {
     state: GeneralsGameState,
     turn: PlayerId,
+}
+
+pub fn evaluate_state(state: GeneralsGameState) -> f64 {
+    let player = state.player_id();
+    GeneralsUctEvaluator::evaluate_leaf(
+        GameStateWrapper {
+            state,
+            turn: 1 - player,
+        },
+        &player,
+    )
 }
 
 #[derive(Debug, Clone, Hash)]
@@ -151,7 +181,7 @@ impl GameTrait for GameStateWrapper {
 
         #[cfg(debug_assertions)]
         {
-            // info!("Did move {:?}, new state\n{}", m, self.state)
+            debug!("Did move {:?}, new state\n{}", m, self.state)
         }
     }
 
@@ -189,13 +219,24 @@ impl Evaluator<GameStateWrapper, f64, ()> for GeneralsUctEvaluator {
 }
 
 struct GeneralsPlayout;
-impl<T: GameTrait> Playout<T> for GeneralsPlayout {
+impl Playout<GameStateWrapper> for GeneralsPlayout {
     type Args = ();
 
-    fn playout(mut state: T, _args: ()) -> T {
+    fn playout(mut state: GameStateWrapper, _args: ()) -> GameStateWrapper {
+        // let friendly_move = state.player_turn() == state.state.player_id();
+
         while !state.is_final() {
             let moves = state.legals_moves();
-            let m = moves.choose(&mut thread_rng()).unwrap();
+
+            let m = if thread_rng().gen_range(0..10) < 4 {
+                // pick randomly from first 10% of moves
+                moves[0..((moves.len() / 10) + 1)]
+                    .choose(&mut thread_rng())
+                    .unwrap()
+            } else {
+                moves.choose(&mut thread_rng()).unwrap()
+            };
+
             state.do_move(m);
         }
         state
@@ -266,7 +307,7 @@ impl GeneralsTreePolicy {
 
         let turn = new_state.turn;
         let new_node = MctsNode {
-            sum_rewards: new_state.state.get_score(&turn),
+            sum_rewards: 0., //new_state.state.get_score(&turn),
             n_visits: 1,
             unvisited_moves: new_state.legals_moves(),
             hash: GameTrait::hash(&new_state),

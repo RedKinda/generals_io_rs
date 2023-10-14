@@ -65,7 +65,7 @@ pub enum LobbyType {
 }
 
 impl GeneralsClient {
-    pub async fn connect(userid: String, username: String, lobby: LobbyType) -> Self {
+    pub async fn connect(userid: &String, username: &String, lobby: &LobbyType) -> Self {
         let (ws_stream, _) = connect_async_tls_with_config(
             GIO_ENDPOINT,
             None,
@@ -205,8 +205,8 @@ impl GeneralsClient {
                     .send(Value::Array(vec![
                         Value::String("join_private".to_owned()),
                         Value::String(gameid.clone()),
-                        Value::String(userid),
-                        Value::String(username),
+                        Value::String(userid.clone()),
+                        Value::String(username.clone()),
                     ]))
                     .await;
 
@@ -215,7 +215,7 @@ impl GeneralsClient {
                 client
                     .send(Value::Array(vec![
                         Value::String("set_force_start".to_owned()),
-                        Value::String(gameid),
+                        Value::String(gameid.clone()),
                         Value::Bool(true),
                     ]))
                     .await;
@@ -225,8 +225,8 @@ impl GeneralsClient {
                 client
                     .send(Value::Array(vec![
                         Value::String("join_1v1".to_owned()),
-                        Value::String(userid),
-                        Value::String(username),
+                        Value::String(userid.clone()),
+                        Value::String(username.clone()),
                     ]))
                     .await;
             }
@@ -243,6 +243,11 @@ impl GeneralsClient {
     pub async fn send_cmd(&mut self, cmd: SerializedMoveCommand) {
         self.send(cmd.to_json(self.move_id)).await;
         self.move_id += 1;
+    }
+
+    pub async fn clear_commands(&mut self) {
+        self.send(Value::Array(vec![Value::String("clear_moves".to_owned())]))
+            .await;
     }
 
     pub async fn wait_game_start(&mut self) -> GameStart {
@@ -263,7 +268,7 @@ impl GeneralsClient {
         panic!("update_rx closed before game start");
     }
 
-    pub async fn get_game_update(&mut self) -> StateUpdate {
+    pub async fn get_game_update(&mut self) -> Option<StateUpdate> {
         let mut res;
 
         loop {
@@ -272,7 +277,7 @@ impl GeneralsClient {
                     res = g;
                     break;
                 } else if let ServerUpdate::GameOver = update {
-                    panic!("Game is over")
+                    return None;
                 } else {
                     warn!("Unexpected update: {:?}", update);
                 }
@@ -289,6 +294,6 @@ impl GeneralsClient {
                 warn!("Unexpected update: {:?}", update);
             }
         }
-        res
+        Some(res)
     }
 }

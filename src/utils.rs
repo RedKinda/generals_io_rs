@@ -1,3 +1,5 @@
+use std::cmp::min;
+
 use crate::state::Location;
 
 pub fn fuck_socketio(mut msg: String) -> Option<String> {
@@ -59,6 +61,23 @@ pub fn get_neighbors(location: Location, width: usize, height: usize) -> Vec<Loc
     if location.1 < height as usize - 1 {
         neighbors.push((location.0, location.1 + 1));
     }
+    neighbors
+}
+
+// gets the 8 neighbors of a location
+#[inline]
+pub fn get_wider_neighbors(location: Location, width: usize, height: usize) -> Vec<Location> {
+    // 8 results with bound checking
+    let mut neighbors = vec![];
+
+    for x in location.0.saturating_sub(1)..=min(location.0 + 1, width - 1) {
+        for y in location.1.saturating_sub(1)..=min(location.1 + 1, height - 1) {
+            if x != location.0 || y != location.1 {
+                neighbors.push((x, y));
+            }
+        }
+    }
+
     neighbors
 }
 

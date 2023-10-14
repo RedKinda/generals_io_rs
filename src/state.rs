@@ -49,6 +49,8 @@ impl TileType {
                 | TileType::OwnedTile
                 | TileType::OwnedGeneral
                 | TileType::OwnedCity
+                | TileType::Enemy
+                | TileType::EnemyCity
                 | TileType::EnemyGeneral
                 | TileType::VisibleNeutralCity
                 | TileType::VisibleMountain
@@ -420,21 +422,23 @@ impl<const PLAYER_COUNT: usize, const W: usize, const H: usize> GameState<PLAYER
                             | TileType::OwnedGeneral
                             | TileType::EnemyCity
                             | TileType::EnemyGeneral
-                    ) && new_state.turn % 2 == 1)
+                    ) && new_state.turn % 2 == 0)
                         || new_state.turn % 50 == 0)
                 {
-                    new_state.armies[tile.owner.unwrap() as usize] += 1;
                     new_state = new_state.change_tile_population((x, y), 1);
                 }
             }
         }
 
-        if new_state.turn % 2 == 1 {
-            // increase army of player of every unrevealed general
-            for (player_id, general) in new_state.generals.iter().enumerate() {
-                if matches!(general, GeneralLocation::Unknown) {
-                    new_state.armies[player_id] += 1;
-                }
+        if new_state.turn % 2 == 0 && new_state.turn % 50 != 0 {
+            // for every player increase population by their city count
+            for player_id in 0..PLAYER_COUNT {
+                new_state.armies[player_id] += new_state.city_count[player_id];
+            }
+        } else if new_state.turn % 50 == 0 {
+            // for every player increase population by their land count
+            for player_id in 0..PLAYER_COUNT {
+                new_state.armies[player_id] += new_state.lands[player_id];
             }
         }
 
@@ -452,12 +456,21 @@ impl<const PLAYER_COUNT: usize, const W: usize, const H: usize> GameState<PLAYER
                     // add all possible commands from this tile
                     for (x2, y2) in get_neighbors((x, y), W, H) {
                         let tile2 = self.get_tile((x2, y2));
-                        if tile2.tile_type.occupiable() {
-                            commands.push(MoveCommand {
-                                from: (x, y),
-                                to: (x2, y2),
-                                half: false,
-                            });
+                        if tile2.tile_type.occupiable()
+                            && (tile.population > tile2.population + 1
+                                || tile2.owner == tile.owner
+                                || tile.population > 5)
+                        //         && (tile.population >= tile2.population))
+                        //     )
+                        {
+                            commands.push((
+                                tile.population + tile2.population,
+                                MoveCommand {
+                                    from: (x, y),
+                                    to: (x2, y2),
+                                    half: false,
+                                },
+                            ));
                         }
                     }
                 }
@@ -467,14 +480,18 @@ impl<const PLAYER_COUNT: usize, const W: usize, const H: usize> GameState<PLAYER
         // we can always move "from general to general"
         // lets disable this for now, and only add it if theres nothing else to do
         if commands.is_empty() {
-            commands.push(MoveCommand {
-                from: self.get_own_general(),
-                to: self.get_own_general(),
-                half: false,
-            });
+            commands.push((
+                1,
+                MoveCommand {
+                    from: self.get_own_general(),
+                    to: self.get_own_general(),
+                    half: false,
+                },
+            ));
         }
 
-        commands
+        commands.sort_by(|a, b| b.0.cmp(&a.0));
+        commands.into_iter().map(|(_, cmd)| cmd).collect()
     }
 
     pub fn reached_max_turns(&self) -> bool {
@@ -537,7 +554,11 @@ impl<const PLAYER_COUNT: usize, const W: usize, const H: usize> GameState<PLAYER
             / PLAYER_COUNT as f64;
 
         // reward for land / sum all owned lands
-        let mut land_reward = self.lands[*turn as usize] as f64 / (W * H) as f64;
+        let land_reward: f64 =
+            self.lands[*turn as usize] as f64 / self.lands.iter().map(|v| *v as f64).sum::<f64>();
+
+        let mut biggest_army_val = 1;
+        let mut biggest_army_location = None;
 
         // having a big army with high manhattan distance from general is good
         // having big enemy army with low manhattan distance from general is bad
@@ -549,36 +570,32 @@ impl<const PLAYER_COUNT: usize, const W: usize, const H: usize> GameState<PLAYER
 
                 let distance = manhattan_distance((x, y), self.get_own_general());
                 if tile.owner == Some(*turn) && tile.population > 3 && distance > 4 {
-                    army_distance_reward += (distance).pow(3) * tile.population as u64;
-                } else if tile.owner.is_some() && distance < 10 {
-                    army_distance_punishment += (10 - distance).pow(3) * tile.population as u64;
+                    // army_distance_reward += (distance).pow(2) * tile.population as u64;
+                }
+                if tile.owner != Some(*turn)
+                    && distance < 20
+                    && tile.tile_type.occupiable()
+                    && (tile.owner.is_some())
+                // either opponent, or empty tile (excludes cities)
+                {
+                    army_distance_punishment += (20 - distance) * (tile.population + 1) as u64;
+                }
+
+                if tile.owner == Some(*turn) && tile.population > biggest_army_val {
+                    biggest_army_val = tile.population;
+                    biggest_army_location = Some((x, y));
                 }
             }
         }
-        let army_distance_reward =
-            (army_distance_reward as f64 / self.armies[*turn as usize] as f64).log2();
-        let army_distance_punishment =
-            (army_distance_punishment as f64 / self.armies[*turn as usize] as f64).log2();
+        // let army_distance_reward = if let Some(loc) = biggest_army_location {
+        //     (manhattan_distance(self.get_own_general(), loc) as f64 * biggest_army_val as f64)
+        // } else {
+        //     0.
+        // };
+        // (army_distance_reward as f64 / self.armies[*turn as usize] as f64).log2();
 
-        // standing army reward - maximum army on a single tile / total army owned
-        let standing_army_reward = self
-            .tiles
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|tile| {
-                        if tile.owner == Some(*turn) {
-                            tile.population
-                        } else {
-                            0
-                        }
-                    })
-                    .max()
-                    .unwrap_or(0)
-            })
-            .max()
-            .unwrap_or(0) as f64
-            / self.armies[*turn as usize] as f64;
+        let army_distance_punishment =
+            (army_distance_punishment as f64 / self.armies[*turn as usize] as f64);
 
         // max of army-land for all opponents
         let max_enemy_standing_army = (0..PLAYER_COUNT).fold(0, |max, player_id| {
@@ -593,27 +610,54 @@ impl<const PLAYER_COUNT: usize, const W: usize, const H: usize> GameState<PLAYER
         }) as f64;
 
         // reward having a big army on general
-        let mut general_army_reward =
-            self.get_tile(self.get_own_general()).population as f64 / max_enemy_standing_army;
-        if general_army_reward > 1. {
-            general_army_reward = 1.;
-        }
+        // let mut general_army_reward =
+        //     self.get_tile(self.get_own_general()).population as f64 / max_enemy_standing_army;
+        // if general_army_reward > 1. {
+        //     general_army_reward = 1.;
+        // }
 
         // sum all fog masks, divide by width * height
         let fog_reward = self
             .fog_mask
             .iter()
-            .map(|row| row.iter().map(|v| min(*v, 1) as f64).sum::<f64>())
+            .enumerate()
+            .map(|(row, row_contents)| {
+                row_contents
+                    .iter()
+                    .enumerate()
+                    .map(|(col, v)| {
+                        (min(*v, 1) as f64)
+                            * if manhattan_distance(self.get_own_general(), (row, col)) < 15 {
+                                1.
+                            } else {
+                                2. // double the reward for tiles far away from general
+                            }
+                    })
+                    .sum::<f64>()
+            })
             .sum::<f64>()
             / (W * H) as f64;
 
-        winner_reward * 35. + army_reward * 50. + fog_reward * 9.
+        debug!("state: {}", self);
+
+        debug!(
+            "winner_reward: {}, army_reward: {}, fog_reward: {}, land_reward: {}, general_reward: {}, general_revealed_punishment: {}, army_distance_reward: {}, army_distance_punishment: {}",
+            winner_reward, army_reward, fog_reward, land_reward, general_reward, general_revealed_punishment, army_distance_reward, army_distance_punishment
+        );
+
+        winner_reward * 50. + army_reward * 20. + fog_reward * 5.
             - general_revealed_punishment * 10.
-            + land_reward * 5.
-            + standing_army_reward * 1.
-            + army_distance_reward * 4.
+            + land_reward * 9.
+            // + standing_army_reward * 1.
+            // + army_distance_reward * 4.
             - army_distance_punishment * 3.
-            + general_army_reward * 3.
+        // + general_army_reward * 3.
+    }
+
+    pub fn get_hash(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
     }
 }
 

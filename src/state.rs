@@ -573,12 +573,12 @@ impl<const PLAYER_COUNT: usize, const W: usize, const H: usize> GameState<PLAYER
                     // army_distance_reward += (distance).pow(2) * tile.population as u64;
                 }
                 if tile.owner != Some(*turn)
-                    && distance < 20
+                    && distance < 10
                     && tile.tile_type.occupiable()
                     && (tile.owner.is_some())
                 // either opponent, or empty tile (excludes cities)
                 {
-                    army_distance_punishment += (20 - distance) * (tile.population + 1) as u64;
+                    army_distance_punishment += (10 - distance) * (tile.population + 1) as u64;
                 }
 
                 if tile.owner == Some(*turn) && tile.population > biggest_army_val {
@@ -665,6 +665,7 @@ impl<const PLAYER_COUNT: usize, const W: usize, const H: usize> Hash
     for GameState<PLAYER_COUNT, W, H>
 {
     fn hash<HS: Hasher>(&self, state: &mut HS) {
+        self.turn.hash(state);
         self.tiles.hash(state);
         self.lands.hash(state);
         self.armies.hash(state);
@@ -734,8 +735,8 @@ impl<const PLAYER_COUNT: usize, const W: usize, const H: usize> Display
 
         // print turn, armies, lands
         s.push_str(&format!(
-            "Turn: {}, Player: {}, Armies: {:?}, Lands: {:?}\n",
-            self.turn, self.player_id, self.armies, self.lands
+            "Turn: {}, Player: {}, Armies: {:?}, Lands: {:?}, Cities: {:?}\n",
+            self.turn, self.player_id, self.armies, self.lands, self.city_count
         ));
 
         for y in 0..H {

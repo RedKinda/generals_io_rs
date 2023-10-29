@@ -1,9 +1,10 @@
 use noisy_float::prelude::{n64, Float};
 use num_traits::{float::FloatConst, ToPrimitive, Zero};
+use oxymcts::NodeMutRef;
 use oxymcts::{
     uct_value, BackPropPolicy, DefaultBackProp, DefaultLazyTreePolicy, DefaultPlayout, Evaluator,
-    GameTrait, LazyMcts, LazyMctsNode, LazyMctsTree, LazyTreePolicy, MctsNode, Nat, NodeId,
-    NodeMut, Num, Playout, Tree,
+    GameTrait, LazyMcts, LazyMctsNode, LazyMctsTree, LazyTreePolicy, MctsNode, Nat, NodeId, Num,
+    Playout, Tree,
 };
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{
@@ -251,28 +252,28 @@ impl<
         A: Clone + Default,
     > BackPropPolicy<T, Move, R, A> for GeneralsBackProp
 {
-    fn backprop(tree: &mut Tree<MctsNode<T, Move, R, A>>, leaf: NodeId, reward: R) {
+    fn backprop(tree: &Tree<MctsNode<T, Move, R, A>>, leaf: NodeId, reward: R) {
         let root_id = tree.root().id();
         let mut current_node_id = leaf;
         // Update the branch
         while current_node_id != root_id {
             let mut node_to_update = tree.get_mut(current_node_id).unwrap();
-            node_to_update.value().n_visits += 1;
-            node_to_update.value().sum_rewards =
+            node_to_update.value_mut().n_visits += 1;
+            node_to_update.value_mut().sum_rewards =
                 node_to_update.value().sum_rewards.clone() + reward.clone();
-            current_node_id = node_to_update.parent().unwrap().id();
+            current_node_id = node_to_update.parent_id();
         }
         // Update root
         let mut node_to_update = tree.get_mut(current_node_id).unwrap();
-        node_to_update.value().n_visits += 1;
-        node_to_update.value().sum_rewards += reward;
+        node_to_update.value_mut().n_visits += 1;
+        node_to_update.value_mut().sum_rewards += reward;
     }
 }
 
 struct GeneralsTreePolicy {}
 impl GeneralsTreePolicy {
     pub fn select(
-        tree: &mut LazyMctsTree<GameStateWrapper, f64, ()>,
+        tree: &LazyMctsTree<GameStateWrapper, f64, ()>,
         turn: &PlayerId,
         evaluator_args: f64,
     ) -> NodeId {
@@ -288,14 +289,14 @@ impl GeneralsTreePolicy {
     }
 
     pub fn expand(
-        mut node_to_expand: NodeMut<LazyMctsNode<GameStateWrapper, f64, ()>>,
+        mut node_to_expand: NodeMutRef<LazyMctsNode<GameStateWrapper, f64, ()>>,
         root_state: GameStateWrapper,
     ) -> (NodeId, GameStateWrapper) {
         let mut new_state = Self::update_state(root_state, &node_to_expand.value().state);
         if !node_to_expand.value().can_add_child() {
             return (node_to_expand.id(), new_state);
         }
-        let unvisited_moves = &mut node_to_expand.value().unvisited_moves;
+        let mut unvisited_moves = &mut node_to_expand.value_mut().unvisited_moves;
         let index = thread_rng().gen_range(0..unvisited_moves.len());
         let move_to_expand = unvisited_moves[index].clone();
         unvisited_moves[index] = unvisited_moves.last().unwrap().clone();
@@ -315,13 +316,13 @@ impl GeneralsTreePolicy {
             additional_info: Default::default(),
         };
 
-        (node_to_expand.append(new_node).id(), new_state)
+        (node_to_expand.add_child(new_node).id(), new_state)
     }
 }
 
 impl LazyTreePolicy<GameStateWrapper, GeneralsUctEvaluator, (), f64> for GeneralsTreePolicy {
     fn tree_policy(
-        tree: &mut LazyMctsTree<GameStateWrapper, f64, ()>,
+        tree: &LazyMctsTree<GameStateWrapper, f64, ()>,
         root_state: GameStateWrapper,
         evaluator_args: &f64,
     ) -> (NodeId, GameStateWrapper) {
@@ -349,12 +350,11 @@ impl LazyTreePolicy<GameStateWrapper, GeneralsUctEvaluator, (), f64> for General
     ) -> NodeId {
         let parent_node = tree.get(parent_id).unwrap();
         let n_visits = parent_node.value().n_visits;
-        parent_node
-            .children()
-            .max_by_key(|child| {
-                GeneralsUctEvaluator::eval_child(child.value(), turn, n_visits, eval_args)
-            })
-            .unwrap()
-            .id()
+
+        let best = parent_node.get_best_child(|child| {
+            GeneralsUctEvaluator::eval_child(child, turn, n_visits, eval_args)
+        });
+
+        best.unwrap()
     }
 }
